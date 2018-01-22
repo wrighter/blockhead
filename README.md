@@ -1,3 +1,3 @@
 # blockhead
 
-Crypto trading strategies and execution
+Crypto trading strategies and execution.
