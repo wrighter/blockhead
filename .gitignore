@@ -99,3 +99,6 @@ ENV/
 
 # mypy
 .mypy_cache/
+
+# keys, we don't ever want these posted
+keys/
