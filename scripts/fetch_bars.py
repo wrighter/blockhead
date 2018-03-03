@@ -21,7 +21,7 @@ import pandas as pd
 from dateutil import parser
 
 from blockhead.gdax import data
-from blockhead.gdax.websocket_client import GDAXWebsocketClient
+from blockhead.gdax.ws_client import GDAXWebsocketClient
 
 def main(args):
     """ the main function """
