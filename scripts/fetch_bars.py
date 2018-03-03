@@ -77,7 +77,7 @@ def main(args):
             if outfile.is_file():
                 outfile.rename(outfile.with_suffix('.bak'))
         sub = bars[bars.index.date == date]
-        sub.to_csv(outfile.open('w'))
+        sub.to_csv(outfile.open('w'), index=False)
         logging.debug("Wrote %s rows to %s", len(sub), outfile)
 
 if __name__ == '__main__':
