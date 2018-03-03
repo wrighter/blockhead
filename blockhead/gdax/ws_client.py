@@ -2,21 +2,29 @@
 GDAX connectivity, manages keys, maintaining current order
 book, and bar generation
 """
+# since we want to use gdax for our package naming
+from __future__ import absolute_import
+
 import logging
 import datetime
 import configparser
-import gdax
+
+from gdax.websocket_client import WebsocketClient
+from gdax.authenticated_client import AuthenticatedClient
+
+from . import data
+
 import pandas as pd
 from bintrees import RBTree
 from decimal import Decimal, MIN_EMIN, MAX_EMAX
 
-class GDAXWebsocketClient(gdax.WebsocketClient):
+class GDAXWebsocketClient(WebsocketClient):
 
-    def __init__(self, config, products, auth, channels):
+    def __init__(self, config, products, auth, channels, should_print=False):
         super(GDAXWebsocketClient, self).__init__(products=products,
-                auth=auth, channels=channels)
+                auth=auth, channels=channels, should_print=should_print)
         self.config = self.parse_config(config)
-        self.authclient = gdax.AuthenticatedClient(self.api_key,
+        self.authclient = AuthenticatedClient(self.api_key,
                 self.api_secret, self.api_passphrase, self.api)
         self._asks = RBTree()
         self._bids = RBTree()
@@ -108,7 +116,7 @@ class GDAXWebsocketClient(gdax.WebsocketClient):
             self.reset_book()
             logging.debug("reset order book")
             return
-
+        logging.debug(msg)
         sequence = msg.get('sequence')
         if sequence is not None:
             if sequence <= self._sequence:
@@ -161,7 +169,7 @@ class GDAXWebsocketClient(gdax.WebsocketClient):
     def on_sequence_gap(self, gap_start, gap_end):
         self.reset_book()
         logging.error('messages missing (%s - %s). Re-initializing  book at sequence: %s',
-                    gap_start, gap_end, self._sequence)
+                      gap_start, gap_end, self._sequence)
 
     def add(self, order):
         order = {
@@ -324,13 +332,4 @@ class GDAXWebsocketClient(gdax.WebsocketClient):
         end -- the end time for the bars, in utc """
         end = end or datetime.datetime.utcnow()
         start = end - datetime.timedelta(minutes=qty)
-        res = self.authclient.get_product_historic_rates(pair, start, end, granularity=60)
-        bars = pd.DataFrame(res, columns=['open_time', 'low', 'high', 'open', 'close', 'volume'])
-        bars['open_time'] = pd.to_datetime(bars['open_time'], unit='s')
-        bars['close_time'] = bars['open_time'].shift()
-        first_close = bars.loc[bars.index[0], 'open_time'] + pd.Timedelta('%s' % granularity)
-        bars.loc[bars.index[0], 'close_time'] = first_close
-        bars.index = bars['close_time']
-        bars = bars.sort_index()
-
-        return bars
+        return data.get_bars(pair, start, end, granularity)
