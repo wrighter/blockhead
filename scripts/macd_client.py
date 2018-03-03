@@ -15,13 +15,15 @@ from decimal import Decimal
 import asyncio
 import pandas as pd
 
-from gdax_websocket_client import GDAXWebsocketClient
-from order_manager import OrderManager
+from blockhead.gdax.ws_client import GDAXWebsocketClient
+from blockhead.gdax.order_manager import OrderManager
 
 def main(args):
-
     client = GDAXWebsocketClient(args.config, products=args.pair,
-            auth=False, channels=["heartbeat", "full"])
+                                 auth=True,
+                                 #channels=["heartbeat", "full"])
+                                 channels=["heartbeat", "full"],
+                                 should_print=True)
 
     products = client.get_products()
     product_map = dict(zip([_['id'] for _ in products], products))
@@ -60,7 +62,7 @@ def main(args):
             logging.info("%s:%s, %s:%s", first, accounts[first]['available'],
                     second, accounts[second]['available'])
 
-    bars = client.get_bars(100)
+    bars = client.get_bars(args.pair, args.lookback * 26)
 
     logging.debug("starting ws client")
     client.start()
@@ -72,10 +74,11 @@ def main(args):
     # decide on price to pay
     # place order and add to order list
     # see the order show up in the feed
-    def do_indicator():
+    def do_indicator(bars):
         """ handle updates """
-        ema1 = bars['close'].ewm(span=12).mean()[-1]
-        ema2 = bars['close'].ewm(span=26).mean()[-1]
+        # XXX move to just doing emas on our own instead of a growing dataframe
+        ema1 = bars['close'].ewm(span=12 * args.lookback).mean()[-1]
+        ema2 = bars['close'].ewm(span=26 * args.lookback).mean()[-1]
         logging.info("close: %s ema1: %s ema2: %s",
                      bars['close'][-1], ema1, ema2)
         try:
@@ -102,7 +105,7 @@ def main(args):
         bar['open_time'] = open_time
         bars = pd.concat([bars, pd.DataFrame(bar, index=[close_time])])
       
-        do_indicator()
+        do_indicator(bars)
 
         logging.info(bars.tail(2))
         td = datetime.timedelta(seconds=60-now.second,
@@ -111,7 +114,7 @@ def main(args):
                               client, bars, loop)
 
 
-    do_indicator()
+    do_indicator(bars)
     loop = asyncio.get_event_loop()
     now = datetime.datetime.now()
     td = datetime.timedelta(seconds=60-now.second,
@@ -139,6 +142,11 @@ if __name__ == '__main__':
                         default=None,
                         type=float,
                         help='quantity to trade')
+    parser.add_argument('-l', '--lookback',
+                        default=15,
+                        type=int,
+                        help='minutes of lookback for moving averages')
+
     parser.add_argument('-d', '--debug', help='enable debug logging', action='store_true')
 
     args = parser.parse_args(sys.argv[1:])
