@@ -13,23 +13,23 @@ import logging
 import sys
 import pathlib
 import datetime
-import time
-import requests
+import asyncio
+
 import gdax
 
 import pandas as pd
 from dateutil import parser
 
 from blockhead.gdax import data
-from blockhead.gdax.ws_client import GDAXWebsocketClient
+from blockhead.util import to_utc
 
-def main(args):
+async def main():
     """ the main function """
     argparser = argparse.ArgumentParser()
     argparser.add_argument('-o', '--output_dir', default='output', help='Directory to save file')
     argparser.add_argument('-d', '--debug', help='enable debug logging', action='store_true')
     argparser.add_argument('-i', '--interval', default=60, help='bar interval in seconds')
-    argparser.add_argument('-q', '--quantity', default=350,
+    argparser.add_argument('-q', '--quantity', default=300,
                            help='number of bars to fetch at a time')
     argparser.add_argument("--start_date",
                            default=(datetime.datetime.utcnow() - datetime.timedelta(days=1)),
@@ -42,8 +42,6 @@ def main(args):
     if args.debug:
         logging.basicConfig(level=logging.DEBUG,
                             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    logging.debug(args)
-
     if isinstance(args.start_date, str):
         args.start_date = parser.parse(args.start_date)
     if isinstance(args.end_date, str):
@@ -53,16 +51,22 @@ def main(args):
         print("Start date %s is after end date %s" % (args.start_date, args.end_date))
         sys.exit(1)
 
-    dates = pd.date_range(args.start_date, args.end_date)
+    # midnight to midnight for this script
+    args.start_date = to_utc(args.start_date)
+    args.end_date = to_utc(args.end_date)
+    args.start_date = args.start_date.replace(hour=0, minute=0, second=0, microsecond=0)
+    args.end_date = args.end_date.replace(hour=0, minute=0, second=0, microsecond=0)
 
-    all_bars = list()
+    logging.debug(args)
 
-    end = args.end_date
-
-    # make a client to keep from instantiating many of these
-    client = gdax.PublicClient()
-    bars = data.fetch_bars(args.pair, args.start_date, args.end_date,
-                           args.interval, client, args.quantity)
+    # make a client to pass along and keep from instantiating many of these
+    client = gdax.trader.Trader(product_id=args.pair)
+    bars = await data.fetch_bars(args.pair, args.start_date,
+                                 args.end_date,
+                                 args.interval, client, args.quantity)
+    if bars is None:
+        logging.warn("No bars fetched")
+        sys.exit(1)
     logging.debug("fetched and combined %s bars", len(bars))
 
     # files are saved in the output directory, then by symbol pair, then by date
@@ -81,4 +85,5 @@ def main(args):
         logging.debug("Wrote %s rows to %s", len(sub), outfile)
 
 if __name__ == '__main__':
-    main(sys.argv)
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(main())

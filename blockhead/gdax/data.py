@@ -12,6 +12,9 @@ import pathlib
 import time
 import logging
 import requests
+import aiohttp
+import asyncio
+import pytz
 
 from dateutil.tz import tzutc
 from dateutil.parser import parse
@@ -20,9 +23,9 @@ import gdax
 import pandas as pd
 
 from blockhead.util import to_utc
-   
-def get_bars(pair, start, end, interval,
-             directory='output', client=None):
+
+async def get_bars(pair, start, end, interval,
+                   directory='output', client=None):
     """ fetches bars from the cache, and if missing gets
     them from gdax and stores them. Assumes that the passed in
     start/end times are in local time, will convert them to UTC.
@@ -39,6 +42,7 @@ def get_bars(pair, start, end, interval,
         start = parse(start)
     if isinstance(end, str):
         end = parse(end)
+
     # convert start and end to UTC
     start = to_utc(start)
     end = to_utc(end)
@@ -63,13 +67,14 @@ def get_bars(pair, start, end, interval,
             bars['close_time'] = bars.index
             all_bars.append(bars)
         else:
-            client = client or gdax.PublicClient()
+            client = client or gdax.trader.Trader(product_id=pair)
             dstart = max(start, date.replace(hour=0, minute=0, second=0))
             dend = min(end, (date + pd.Timedelta('1d')).replace(hour=0, minute=0, second=0))
-            all_bars.append(fetch_bars(pair, dstart, dend, interval, client))
-    return pd.concat(all_bars)[start:end]
+            all_bars.append(await fetch_bars(pair, dstart, dend, interval, client))
+    if len(all_bars):
+        return pd.concat(all_bars)[start:end]
 
-def fetch_bars(pair, start, end, interval, client=None, batch=350):
+async def fetch_bars(pair, start, end, interval, client=None, batch=350):
     """ fetches bars from GDAX's public api
     pair -- the gdax currency pair
     start -- the start datetime
@@ -84,33 +89,47 @@ def fetch_bars(pair, start, end, interval, client=None, batch=350):
 
     full_start = start
     full_end = end
-    client = client or gdax.PublicClient()
+    client = client or gdax.trader.Trader(product_id=pair)
     sleep_time = 0.5
+    failures = 0
     all_bars = list()
     complete = start
     while end > complete:
         # work backwards from end_date to start_date by batch size
         try:
             start = end - pd.Timedelta('%ss' % interval) * batch
-            bars = fetch_bar_batch(pair, start, end, interval, client)
+            bars = await fetch_bar_batch(pair, start, end, interval, client)
         except requests.HTTPError as err:
-            print(err, type(err.errno), err.errno, err.response.status_code)
+            logging.error("request error: %s", err)
             if err.response.status_code == 429:
-                sleep_time += 1
+                failures += 1
+                sleep_time = 2 ** failures
+                logging.error("sleeping: %s", sleep_time)
                 time.sleep(sleep_time)
                 continue
             else:
                 raise err
-        logging.debug("fetched %s bars ending at %s", len(bars), end)
+        except aiohttp.ClientResponseError as err:
+            logging.error("request error: %s", err)
+            if err.code == 429:
+                failures += 1
+                sleep_time = 2 ** failures
+                logging.error("sleeping: %s", sleep_time)
+                time.sleep(sleep_time)
+                continue
+            else:
+                raise err
+        logging.debug("fetched %s bars from %s to %s", len(bars), start, end)
         all_bars.append(bars)
         end = bars.index[0]
         time.sleep(sleep_time)
 
     all_bars.reverse() # since we went backward in blocks
-    bars = pd.concat(all_bars)
-    return bars[full_start:full_end]
+    if len(all_bars):
+        bars = pd.concat(all_bars)
+        return bars[full_start:full_end]
 
-def fetch_bar_batch(pair, start, end, interval, client=None):
+async def fetch_bar_batch(pair, start, end, interval, client=None):
     """ fetches one batch of bars from GDAX's public api
     pair -- the gdax currency pair
     start -- the start datetime
@@ -118,8 +137,24 @@ def fetch_bar_batch(pair, start, end, interval, client=None):
     interval -- the bar interval in seconds
     client -- the gdax client to use to fetch bars if needed
     """
-    client = client or gdax.PublicClient()
-    res = client.get_product_historic_rates(pair, start, end, granularity=interval)
+    client = client or gdax.trader.Trader(product_id=pair)
+    attempts = 0
+    max_attempts = 5
+    while attempts <= max_attempts:
+        try:
+            res = await client.get_product_historic_rates(start=start.strftime('%Y-%m-%dT%H:%M:%S'),
+                                                          end=end.strftime('%Y-%m-%dT%H:%M:%S'),
+                                                          granularity=interval)
+            break
+        except asyncio.TimeoutError as toe:
+            attempts += 1
+            logging.warning('Timeout fetching bars, attempt %d', attempts)
+            if attempts == max_attempts:
+                raise toe
+        except aiohttp.ClientResponseError as cre:
+            logging.warning('Error fetching bars: %s - are you fetching too many at once?', cre)
+            raise cre
+
     bars = pd.DataFrame(res, columns=['open_time', 'low', 'high', 'open', 'close', 'volume'])
     bars['open_time'] = pd.to_datetime(bars['open_time'], unit='s')
     bars['close_time'] = bars['open_time'].shift()
