@@ -99,16 +99,6 @@ async def fetch_bars(pair, start, end, interval, client=None, batch=350):
         try:
             start = end - pd.Timedelta('%ss' % interval) * batch
             bars = await fetch_bar_batch(pair, start, end, interval, client)
-        except requests.HTTPError as err:
-            logging.error("request error: %s", err)
-            if err.response.status_code == 429:
-                failures += 1
-                sleep_time = 2 ** failures
-                logging.error("sleeping: %s", sleep_time)
-                time.sleep(sleep_time)
-                continue
-            else:
-                raise err
         except aiohttp.ClientResponseError as err:
             logging.error("request error: %s", err)
             if err.code == 429:
@@ -118,7 +108,8 @@ async def fetch_bars(pair, start, end, interval, client=None, batch=350):
                 time.sleep(sleep_time)
                 continue
             else:
-                raise err
+                # let's at least save what we've already downloaded
+                break
         logging.debug("fetched %s bars from %s to %s", len(bars), start, end)
         all_bars.append(bars)
         end = bars.index[0]
