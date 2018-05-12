@@ -9,16 +9,17 @@ import logging
 import datetime
 import configparser
 
-from gdax.websocket_client import WebsocketClient
-from gdax.authenticated_client import AuthenticatedClient
+from gdax.websocket_feed_listener import WebsocketFeedListener
+from gdax.trader import Trader
 
 from . import data
 
 import pandas as pd
 from bintrees import RBTree
 from decimal import Decimal, MIN_EMIN, MAX_EMAX
+from collections import defaultdict
 
-class GDAXWebsocketClient(WebsocketClient):
+class GDAXWebsocketClient(WebsocketFeedListener):
 
     def __init__(self, config, products, auth, channels, should_print=False):
         super(GDAXWebsocketClient, self).__init__(products=products,
@@ -30,6 +31,11 @@ class GDAXWebsocketClient(WebsocketClient):
         self._bids = RBTree()
         self._sequence = -1
         self._current_ticker = None
+        self.order_callbacks = list()
+        self.initialized = False
+        self.should_print = should_print
+        self.observed_orders = set()
+        self.event_listeners = defaultdict(list)
 
     def parse_config(self, config):
         """ parses the data from the config """
@@ -44,6 +50,15 @@ class GDAXWebsocketClient(WebsocketClient):
         except KeyError as ke:
             logging.error(ke)
             raise ke
+
+    def add_order_callback(self, callback):
+        """ adds a callback that will be notified of all orders
+        seen in the feed for this account """
+        self.order_callbacks.append(callback)
+
+    def observe_order(self, oid):
+        """ begin to look for this order, and notify client """
+        self.observed_orders.add(oid)
 
     def get_products(self):
         return self.authclient.get_products()
@@ -67,6 +82,7 @@ class GDAXWebsocketClient(WebsocketClient):
         logging.debug("on_close")
 
     def reset_book(self):
+        self.initialized = False
         self._asks = RBTree()
         self._bids = RBTree()
         res = self.authclient.get_product_order_book(product_id=self.products[0], level=3)
@@ -85,6 +101,17 @@ class GDAXWebsocketClient(WebsocketClient):
                 'size': Decimal(ask[1])
             })
         self._sequence = res['sequence']
+        self.initialized = True
+        self.notify_listeners('initialized')
+
+    def add_listener(self, cb, event):
+        """ adds this listener to the event callbacks """
+        self.event_listeners[event].append(cb)
+
+    def notify_listeners(self, event):
+        """ notify all listeners  of the event """
+        for cb in self.event_listeners.get(event, []):
+            cb(event)
 
     def init_bar(self):
         self.high_price = MIN_EMIN
@@ -111,12 +138,13 @@ class GDAXWebsocketClient(WebsocketClient):
         return bar
 
     def on_message(self, msg):
+        if self.should_print:
+            logging.debug(msg)
         self.message_count += 1
         if self._sequence == -1:
             self.reset_book()
             logging.debug("reset order book")
             return
-        logging.debug(msg)
         sequence = msg.get('sequence')
         if sequence is not None:
             if sequence <= self._sequence:
@@ -128,13 +156,17 @@ class GDAXWebsocketClient(WebsocketClient):
                 logging.debug('gap from %s detected in %s', self._sequence, msg)
                 return
 
+        if 'user_id' in msg and len(self.observed_orders) and len(self.order_callbacks):
+            for _ in self.order_callbacks:
+                _(msg)
+
         if msg['type'] == 'error':
             logging.error(msg['message'])
         elif msg['type'] == 'subscriptions':
             logging.info('Subscriptions')
             for _ in msg['channels']:
                 logging.info('%s - products: %s', _['name'],
-                        ",".join(_['product_ids']))
+                             ",".join(_['product_ids']))
         elif msg['type'] == 'heartbeat':
             # can check for missed messages? or does sequence handle this?
             pass
@@ -323,13 +355,12 @@ class GDAXWebsocketClient(WebsocketClient):
     def set_bids(self, price, bids):
         self._bids.insert(price, bids)
 
-
     def get_bars(self, pair, qty, granularity=60, end=None):
-        """ get qty 1 minute bars for pair
+        """ get qty granularity second bars for pair
         pair -- the currency pair
         qty -- number of periods to fetch
         granularity -- the number of seconds to include
         end -- the end time for the bars, in utc """
         end = end or datetime.datetime.utcnow()
-        start = end - datetime.timedelta(minutes=qty)
+        start = end - datetime.timedelta(seconds=qty * granularity)
         return data.get_bars(pair, start, end, granularity)

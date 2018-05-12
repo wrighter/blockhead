@@ -11,10 +11,9 @@ from __future__ import absolute_import
 import pathlib
 import time
 import logging
-import requests
 import aiohttp
 import asyncio
-import pytz
+import configparser
 
 from dateutil.tz import tzutc
 from dateutil.parser import parse
@@ -24,7 +23,27 @@ import pandas as pd
 
 from blockhead.util import to_utc
 
-async def get_bars(pair, start, end, interval,
+def parse_config(config):
+    """ parses the data from a config, return info """
+    cparser = configparser.ConfigParser()
+    cparser.read_file(config)
+    try:
+        api_key = cparser['keys']['key']
+        api_secret = cparser['keys']['secret']
+        api_passphrase = cparser['keys']['passphrase']
+        api = cparser['uris']['api']
+        url = cparser['uris']['wsapi']
+        return dict(api_key=api_key,
+                    api_secret=api_secret,
+                    api_passphrase=api_passphrase,
+                    api=api,
+                    url=url)
+    except KeyError as kerr:
+        logging.error(kerr)
+        raise kerr
+
+
+def get_bars(pair, start, end, interval,
                    directory='output', client=None):
     """ fetches bars from the cache, and if missing gets
     them from gdax and stores them. Assumes that the passed in
@@ -66,11 +85,11 @@ async def get_bars(pair, start, end, interval,
                                date_parser=date_utc)
             bars['close_time'] = bars.index
             all_bars.append(bars)
-        else:
-            client = client or gdax.trader.Trader(product_id=pair)
-            dstart = max(start, date.replace(hour=0, minute=0, second=0))
-            dend = min(end, (date + pd.Timedelta('1d')).replace(hour=0, minute=0, second=0))
-            all_bars.append(await fetch_bars(pair, dstart, dend, interval, client))
+#        else:
+#            client = client or gdax.trader.Trader(product_id=pair)
+#            dstart = max(start, date.replace(hour=0, minute=0, second=0))
+#            dend = min(end, (date + pd.Timedelta('1d')).replace(hour=0, minute=0, second=0))
+#            all_bars.append(await fetch_bars(pair, dstart, dend, interval, client))
     if len(all_bars):
         return pd.concat(all_bars)[start:end]
 
