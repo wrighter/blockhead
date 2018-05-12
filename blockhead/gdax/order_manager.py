@@ -13,50 +13,43 @@ from decimal import Decimal
 from collections import defaultdict
 
 class Order:
-    """ Base class to encapsulate an order, tracking current state.
-    Supports creating an order for the quantity to buy/sell at the
+    """ Base class to encapsulate an order on the exchange, and that 
+    can track its current state when given all messages.
+    Supports creating an order for the size to buy/sell at the
     inside bid/ask by default.
     """
     FIVE_PLACES = Decimal(10) ** -5
 
-    def __init__(self, quantity, pair, limit_price=None):
-        """ initialize with signed quantity """
-        self.quantity = quantity
+    def __init__(self, size, pair, mgr, limit_price=None):
+        """ initialize with signed size """
+        self.size = size
         self.pair = pair
         self.limit_price = limit_price
-        self.total = abs(quantity)
-        self.outstanding = abs(quantity)
+        self.total = abs(size)
+        self.outstanding = abs(size)
         self.placed = Decimal(0)
         self.filled = Decimal(0)
         self.state = 'initial'
-        self.mgr = None
+        self.mgr = mgr
+        self.client_oid = str(uuid.uuid4())
+        self.order_id = None
 
     def __str__(self):
         """ standard string representation """
-        return '<Order q: {0}, o: {1}, lp: {2}. p: {3}, f: {4}, s: {5}'.format(
-                self.quantity, self.outstanding, self.limit_price, 
-                self.placed, self.filled, self.state)
+        return f'<Order size: {self.size}, o: {self.outstanding}, lp: {self.limit_price}. p: {self.placed}, f: {self.filled}, s: {self.state}'
 
-    async def begin(self, mgr):
+    async def begin(self):
         """ tell the order to begin its process, using the
         initialized ordermanager """
-        self.mgr = mgr
-        # XXX fix this
-        mgr.tickdata.add_order_callback(self.handle_order_update)
-        if self.quantity > 0:
-            # buy at the bid
-            price = mgr.tickdata.orderbook.get_bid(self.pair)
-            res = await mgr.buy(price=str(price), size=self.total)
+        if self.size > 0:
+            res = await self.mgr.buy(self)
         else:
-            # sell at the ask
-            price = mgr.tickdata.orderbook.get_ask(self.pair)
-            res = await mgr.sell(price=str(price), size=self.total)
+            res = await self.mgr.sell(self)
         self.placed = res['size']
         logging.debug("Order: placed - %s", res)
 
     def handle_order_update(self, msg):
         """ callback to handle our updates """
-        logging.debug("Order update: %s", msg)
         if msg['type'] == 'received':
             logging.debug('Order received')
             self.state = 'received'
@@ -76,12 +69,13 @@ class Order:
 class OrderManager(object):
     """
     Class to manage orders on GDAX. Using an authclient, will get initial
-    orders, place new ones, and hook up to the websocket feed and place
-    update the internal order status as needed
+    orders, place new ones, and connect to the websocket feed and monitor
+    order updates
     """
     def __init__(self, tickdata, pair):
         self.tickdata = tickdata
         self.tickdata.add_listener(self.on_init, 'initialized')
+        self.tickdata.add_order_callback(self.handle_order_update)
         self.client = self.tickdata.authtrader
         self.pair = pair
 
@@ -90,6 +84,7 @@ class OrderManager(object):
         self.buy_qty = 0
         self.sell_qty = 0
         self.pending_orders = []
+        self.order_lookup = dict()
 
     async def init(self):
         """ async initialization """
@@ -124,27 +119,26 @@ class OrderManager(object):
         return ("Buys: %s" % self.buy_qty + ",".join(buydata) +
                 " Sells: %s" % self.sell_qty + ",".join(selldata))
 
-    async def add_order(self, quantity):
-        """ adds an order to buy/sell the target quantity """
-        order = Order(quantity, self.pair)
+    async def add_order(self, size):
+        """ adds an order to buy/sell the target size """
+        order = Order(size, self.pair, self)
+        self.order_lookup[order.client_oid] = order
         if self.tickdata.initialized:
-            await order.begin(self)
+            await order.begin()
         else:
-            self.add_pending_order(order)
+            self.pending_orders.append(order)
         return order
-
-    def add_pending_order(self, order):
-        """ begin these orders when initialized """
-        self.pending_orders.append(order)
 
     async def on_init(self, _):
         """ when client has data, we can process pending orders """
         for order in self.pending_orders:
-            await order.begin(self)
+            await order.begin()
         self.pending_orders.clear()
 
     async def cancel_all(self):
-        """ cancel all orders for the pair """
+        """ cancel all orders for the pair
+        XXX this is for all orders for this pair, even ones we didn't create
+        """
         return await self.client.cancel_all(product_id=self.pair)
 
     async def cancel_buys(self):
@@ -179,28 +173,53 @@ class OrderManager(object):
                 responses.append(await self.client.cancel(order['id']))
         return responses
 
-    async def sell(self, price, size):
-        """ create a new sell order at this price """
-        price = str(price)
-        order_id = str(uuid.uuid4())
-        self.tickdata.observe_order(order_id)
-        order = await self.client.sell(size=str(size), price=price, product_id=self.pair,
-                                       time_in_force='GTT', post_only=True, type='limit',
-                                       cancel_after='day', client_oid=order_id)
-        if 'id' in order:
-            self.buys[price] = order
-            self.tickdata.observe_order(order['id'])
-        return order
+    async def sell(self, order):
+        """ create a new sell limit order at this price """
+        if order.limit_price is None:
+            # default sell at the ask
+            order.limit_price = self.tickdata.orderbook.get_ask(order.pair)
+        logging.debug('Placing order: %s', order) 
+        res = await self.client.sell(size=order.total,
+                                     price=order.limit_price,
+                                     product_id=order.pair,
+                                     time_in_force='GTT',
+                                     post_only=True,
+                                     type='limit',
+                                     cancel_after='day',
+                                     client_oid=order.client_oid)
+        if 'id' in res:
+            order.order_id = res['id']
+            self.order_lookup[order.order_id] = order
+        return res
 
-    async def buy(self, price, size):
-        """ create a new buy order at this price """
-        price = str(price)
-        order_id = str(uuid.uuid4())
-        self.tickdata.observe_order(order_id)
-        order = await self.client.buy(size=str(size), price=price, product_id=self.pair,
-                                      time_in_force='GTT', post_only=True, type='limit',
-                                      cancel_after='day', client_oid=order_id)
-        if 'id' in order:
-            self.buys[price] = order
-            self.tickdata.observe_order(order['id'])
-        return order
+    async def buy(self, order):
+        """ create a new buy limit order at this price """
+        if order.limit_price is None:
+            # buy at the bid
+            order.limit_price = self.tickdata.orderbook.get_bid(order.pair)
+ 
+        logging.debug('Placing order: %s', order) 
+        res = await self.client.buy(size=order.total,
+                                    price=order.limit_price,
+                                    product_id=order.pair,
+                                    time_in_force='GTT',
+                                    post_only=True,
+                                    type='limit',
+                                    cancel_after='day',
+                                    client_oid=order.client_oid)
+        if 'id' in res:
+            order.order_id = res['id']
+            self.order_lookup[order.order_id] = order
+        return res
+
+    async def handle_order_update(self, msg):
+        """ callback to handle all updates for our orders"""
+        logging.debug("Order update: %s", msg)
+        for key in ['client_oid', 'order_id', 'maker_order_id', 'taker_order_id']:
+            if key in msg:
+                order = self.order_lookup.get(msg[key])
+                if order:
+                    order.handle_order_update(msg)
+                    return
+        logging.error("Could not find matching order: %s", msg)
+

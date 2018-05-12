@@ -75,7 +75,6 @@ class TickData(object):
         self.orderbook = None
         self.initialized = False
         self.current_bar = None
-        self.observed_orders = set()
         self.event_listeners = defaultdict(list)
         self.order_callbacks = list()
         self._stop = None
@@ -119,7 +118,7 @@ class TickData(object):
             # bar processing
             self.current_bar.handle_close(Decimal(msg['price']), Decimal(msg['size']))
         if 'user_id' in msg:
-            self.notify_order_listeners(msg)
+            await self.notify_order_listeners(msg)
         return msg
 
     async def get_products(self):
@@ -149,14 +148,10 @@ class TickData(object):
         seen in the feed for this account """
         self.order_callbacks.append(callback)
 
-    def notify_order_listeners(self, msg):
-        """ notify the order listener of the order updates """
+    async def notify_order_listeners(self, msg):
+        """ notify the order listeners of the order updates """
         for cback in self.order_callbacks:
-            cback(msg)
-
-    def observe_order(self, oid):
-        """ begin to look for this order, and notify client """
-        self.observed_orders.add(oid)
+            await cback(msg)
 
     def add_listener(self, cback, event):
         """ adds this listener to the event callbacks """
