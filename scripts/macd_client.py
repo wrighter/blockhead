@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-File: gdax_client.py
+File: macd_client.py
 Author: Matt Wright
 Email: matt@wrighters.net
 Github: https://github.com/wrighter
@@ -15,57 +15,54 @@ from decimal import Decimal
 import asyncio
 import pandas as pd
 
-from blockhead.gdax.ws_client import GDAXWebsocketClient
-from blockhead.gdax.order_manager import OrderManager
+from blockhead.gdax.tick_data import TickData
+from blockhead.gdax.order_manager import OrderManager, Order, FollowStrategy
 
-def main(args):
-    client = GDAXWebsocketClient(args.config, products=args.pair,
-                                 auth=True,
-                                 #channels=["heartbeat", "full"])
-                                 channels=["heartbeat", "full"],
-                                 should_print=True)
+async def run(loop, args):
+    """ run the model """
+    client = TickData(args.config, args.pair,
+                      timeout_sec=args.timeout)
 
-    products = client.get_products()
+    products = await client.get_products()
     product_map = dict(zip([_['id'] for _ in products], products))
     if args.pair not in product_map:
         logging.error("Pair not found in products")
         sys.exit(1)
 
-    ordermanager = OrderManager(client.authclient, args.pair)
-
+    ordermanager = OrderManager(client, args.pair)
+    await ordermanager.init()
     logging.debug(ordermanager)
 
-    ticker = client.authclient.get_product_ticker(args.pair)
+    ticker = await client.get_product_ticker(args.pair)
 
     if ticker:
         logging.info("got ticker for %s, %s", args.pair, ticker)
     else:
-        logging.error("failed to get ticker: %s" % ticker)
+        logging.error("failed to get ticker: %s", ticker)
         sys.exit(1)
 
-    accounts = client.authclient.get_accounts()
+    accounts = await client.get_account()
     accounts = dict(zip([_['currency'] for _ in accounts], accounts))
     (first, second) = args.pair.split('-')
     logging.info("You have %s %s", first, accounts[first]['available'])
     logging.info("You have %s %s", second, accounts[second]['available'])
 
-    # assume that trade_qty is first in pair, and that we need
+    # assume that quantity is first in pair, and that we need
     # at least that amount in the pair on either side to run
-    if args.trade_qty:
+    if args.quantity:
         total_qty = Decimal(accounts[first]['available'])
         total_qty += Decimal(accounts[second]['available'])/Decimal(ticker['price'])
-        if total_qty < args.trade_qty:
+        if total_qty < args.quantity:
             logging.error('Insufficient funds, exiting')
             sys.exit(1)
         else:
-            logging.info('We have %s available to trade %s', total_qty, args.trade_qty)
+            logging.info('We have %s available to trade %s', total_qty, args.quantity)
             logging.info("%s:%s, %s:%s", first, accounts[first]['available'],
-                    second, accounts[second]['available'])
+                         second, accounts[second]['available'])
 
-    bars = client.get_bars(args.pair, args.lookback * 26)
+    bars = await client.get_bars(args.pair, args.lookback * 26)
 
     logging.debug("starting ws client")
-    client.start()
 
     # TODO
     # figure out total quantity in orders outstanding
@@ -76,14 +73,18 @@ def main(args):
     # see the order show up in the feed
     def do_indicator(bars):
         """ handle updates """
+        if not client.initialized:
+            return
         # XXX move to just doing emas on our own instead of a growing dataframe
         ema1 = bars['close'].ewm(span=12 * args.lookback).mean()[-1]
         ema2 = bars['close'].ewm(span=26 * args.lookback).mean()[-1]
         logging.info("close: %s ema1: %s ema2: %s",
                      bars['close'][-1], ema1, ema2)
         try:
-            logging.info("bid: %s ask: %s", client.get_bid(), client.get_ask())
-        except ValueError as verr:
+            logging.info("bid: %s ask: %s",
+                         client.orderbook.get_bid(args.pair),
+                         client.orderbook.get_ask(args.pair))
+        except ValueError as _:
             logging.info("No book yet")
 
         if ema1 > ema2:
@@ -93,52 +94,47 @@ def main(args):
 
     def on_bar(client, bars, loop):
         """ handles appending to the bar """
-        logging.debug("message_count = %s", client.message_count)
-        bar = client.get_bar()
+        logging.debug("sequence_id = %s",
+                      client.orderbook._sequences[args.pair])
+        if not client.initialized:
+            logging.warning("TickData not yet initialized, missing a bar")
+            return
+        current_bar = client.current_bar.get_bar()
         # append to bars
         now = datetime.datetime.utcnow()
-        td = datetime.timedelta(seconds=now.second,
-                                microseconds=now.microsecond)
-        close_time = now - td
+        tdelta = datetime.timedelta(seconds=now.second,
+                                    microseconds=now.microsecond)
+        close_time = now - tdelta
         open_time = close_time - datetime.timedelta(minutes=1)
-        bar['close_time'] = close_time
-        bar['open_time'] = open_time
-        bars = pd.concat([bars, pd.DataFrame(bar, index=[close_time])])
-      
+        current_bar['close_time'] = close_time
+        current_bar['open_time'] = open_time
+        bars = pd.concat([bars, pd.DataFrame(current_bar, index=[close_time])])
+
         do_indicator(bars)
 
         logging.info(bars.tail(2))
-        td = datetime.timedelta(seconds=60-now.second,
-                                microseconds=now.microsecond)
-        handle = loop.call_at(loop.time() + td.total_seconds(), on_bar,
-                              client, bars, loop)
-
+        tdelta = datetime.timedelta(seconds=60-now.second,
+                                    microseconds=now.microsecond)
+        loop.call_at(loop.time() + tdelta.total_seconds(), on_bar,
+                     client, bars, loop)
 
     do_indicator(bars)
-    loop = asyncio.get_event_loop()
     now = datetime.datetime.now()
-    td = datetime.timedelta(seconds=60-now.second,
-                            microseconds=now.microsecond)
-    handle = loop.call_at(loop.time() + td.total_seconds(), on_bar,
-                          client, bars, loop)
+    tdelta = datetime.timedelta(seconds=60-now.second,
+                                microseconds=now.microsecond)
+    loop.call_at(loop.time() + tdelta.total_seconds(), on_bar,
+                 client, bars, loop)
 
-    try:
-        loop.run_forever()
-    except KeyboardInterrupt:
-        logging.info("Quitting")
-        handle.cancel()
-        client.close()
-        loop.stop()
-        sys.exit(0)
-    loop.close()
+    await client.run()
 
-if __name__ == '__main__':
+def main():
+    """ main function, parses args and sets up loop """
     parser = argparse.ArgumentParser(description='Simple GDAX market maker')
     parser.add_argument('config',
-                        type=argparse.FileType('r'), 
+                        type=argparse.FileType('r'),
                         help='path to a config containing keys and urls')
     parser.add_argument('pair', help='currency pair to trade')
-    parser.add_argument('-t', '--trade_qty',
+    parser.add_argument('quantity',
                         default=None,
                         type=float,
                         help='quantity to trade')
@@ -146,7 +142,10 @@ if __name__ == '__main__':
                         default=15,
                         type=int,
                         help='minutes of lookback for moving averages')
-
+    parser.add_argument('--timeout',
+                        type=int,
+                        default=10,
+                        help='timeout for trader requests (in seconds)')
     parser.add_argument('-d', '--debug', help='enable debug logging', action='store_true')
 
     args = parser.parse_args(sys.argv[1:])
@@ -154,4 +153,16 @@ if __name__ == '__main__':
         logging.basicConfig(level=logging.DEBUG,
                             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     logging.debug(args)
-    main(args)
+
+    loop = asyncio.get_event_loop()
+
+    try:
+        loop.run_until_complete(run(loop, args))
+    except KeyboardInterrupt:
+        logging.info("Quitting")
+        loop.stop()
+
+    loop.close()
+
+if __name__ == '__main__':
+    main()
