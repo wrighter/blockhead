@@ -18,7 +18,7 @@ from decimal import Decimal
 import asyncio
 
 from blockhead.gdax.tick_data import TickData
-from blockhead.gdax.order_manager import OrderManager, Order
+from blockhead.gdax.order_manager import OrderManager, Order, SimpleStrategy, FollowStrategy
 
 async def run(loop, client, ordermanager, args):
     """ main run function, runs until position is obtained or user exits """
@@ -76,25 +76,27 @@ async def run(loop, client, ordermanager, args):
     # It will handle all order events by doing the correct thing
     # If it eventually terminates (due to error or being filled or timing out)
     # it will notify the script which will terminate.
-    order = await ordermanager.add_order(args.quantity)
+    strategy = await ordermanager.add_strategy(FollowStrategy(args.quantity))
 
     logging.debug("starting ws client")
 
-    def do_update(loop, order, client):
+    def do_update(loop, strategy, client):
         """ callback for checking on position status on a timer """
         # XXX check on the order, perhaps update its state?
-        if order.state == 'done':
+        if strategy.is_complete():
             logging.debug("All done, exiting")
             client.stop()
+        else:
+            asyncio.ensure_future(strategy.update_orders())
         td = datetime.timedelta(seconds=1,
                                 microseconds=now.microsecond)
         handle = loop.call_at(loop.time() + td.total_seconds(), do_update, loop,
-                              order, client)
+                              strategy, client)
 
     now = datetime.datetime.now()
     td = datetime.timedelta(seconds=1, microseconds=now.microsecond)
     handle = loop.call_at(loop.time() + td.total_seconds(), do_update, loop,
-                          order, client)
+                          strategy, client)
 
     await client.run()
 
@@ -113,6 +115,13 @@ def main():
     parser.add_argument('--limit_price',
                         type=float,
                         help='limit price to bid/offer to obtain position')
+    parser.add_argument('--follow',
+                        action='store_true',
+                        help='follow the market at check interval')
+    parser.add_argument('--timeout',
+                        type=int,
+                        default=10,
+                        help='timeout for trader requests (in seconds)')
 
     parser.add_argument('-d', '--debug', help='enable debug logging', action='store_true')
 
@@ -124,7 +133,8 @@ def main():
 
 
     client = TickData(args.config, args.pair,
-                      trade_log_file_path=args.tradefile)
+                      trade_log_file_path=args.tradefile,
+                      timeout_sec=args.timeout)
 
     ordermanager = OrderManager(client, args.pair)
 
