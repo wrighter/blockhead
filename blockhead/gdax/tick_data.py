@@ -15,7 +15,7 @@ import logging
 from decimal import Decimal, MIN_EMIN, MAX_EMAX
 from collections import defaultdict
 
-from blockhead.gdax.data import parse_config
+from blockhead.gdax.data import parse_config, fetch_bars
 from gdax.trader import Trader
 from gdax.orderbook import OrderBook
 
@@ -60,18 +60,20 @@ class TickData(object):
     """ TickData will allow for clients to obtain messages and
     process them after they are saved in the OrderBook """
     def __init__(self, config, product_id='ETH-USD', use_heartbeat=False,
-                 trade_log_file_path=None):
+                 trade_log_file_path=None, timeout_sec=10):
 
         cfg = parse_config(config)
         self.product_id = product_id
         self.api_key = cfg['api_key']
         self.api_secret = cfg['api_secret']
         self.passphrase = cfg['api_passphrase']
+        self.timeout_sec = timeout_sec
         self.trade_log_file_path = trade_log_file_path
         self.authtrader = Trader(product_id=self.product_id,
                                  api_key=self.api_key,
                                  api_secret=self.api_secret,
-                                 passphrase=self.passphrase)
+                                 passphrase=self.passphrase,
+                                 timeout_sec=timeout_sec)
         self.orderbook = None
         self.initialized = False
         self.current_bar = None
@@ -89,7 +91,8 @@ class TickData(object):
                              self.api_key,
                              self.api_secret,
                              self.passphrase,
-                             trade_log_file_path=self.trade_log_file_path) as orderbook:
+                             trade_log_file_path=self.trade_log_file_path,
+                             timeout_sec=self.timeout_sec) as orderbook:
             self.orderbook = orderbook
             while True:
                 if self._stop:
@@ -162,7 +165,7 @@ class TickData(object):
         for cback in self.event_listeners.get(event, []):
             await cback(event)
 
-    def get_bars(self, pair, qty, granularity=60, end=None):
+    async def get_bars(self, pair, qty, granularity=60, end=None):
         """ get qty granularity second bars for pair
         pair -- the currency pair
         qty -- number of periods to fetch
@@ -170,4 +173,5 @@ class TickData(object):
         end -- the end time for the bars, in utc """
         end = end or datetime.datetime.utcnow()
         start = end - datetime.timedelta(seconds=qty * granularity)
-        return data.get_bars(pair, start, end, granularity)
+        return await fetch_bars(pair, start, end, granularity,
+                                client=self.authtrader, batch=min(300,qty))

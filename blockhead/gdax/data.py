@@ -93,7 +93,7 @@ def get_bars(pair, start, end, interval,
     if len(all_bars):
         return pd.concat(all_bars)[start:end]
 
-async def fetch_bars(pair, start, end, interval, client=None, batch=350):
+async def fetch_bars(pair, start, end, interval, client=None, batch=300):
     """ fetches bars from GDAX's public api
     pair -- the gdax currency pair
     start -- the start datetime
