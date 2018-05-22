@@ -90,13 +90,13 @@ async def run(loop, client, ordermanager, args):
             asyncio.ensure_future(strategy.update_orders())
         td = datetime.timedelta(seconds=1,
                                 microseconds=now.microsecond)
-        handle = loop.call_at(loop.time() + td.total_seconds(), do_update, loop,
-                              strategy, client)
+        loop.call_at(loop.time() + td.total_seconds(), do_update, loop,
+                     strategy, client)
 
     now = datetime.datetime.now()
     td = datetime.timedelta(seconds=1, microseconds=now.microsecond)
-    handle = loop.call_at(loop.time() + td.total_seconds(), do_update, loop,
-                          strategy, client)
+    loop.call_at(loop.time() + td.total_seconds(), do_update, loop,
+                 strategy, client)
 
     await client.run()
 
