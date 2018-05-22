@@ -31,6 +31,8 @@ class Bar(object):
 
     def handle_close(self, close, size):
         """ canonical bar close processing """
+        if close is None:
+            return
         self.close_price = close
         if self.close_price > self.high_price:
             self.high_price = self.close_price
@@ -69,7 +71,7 @@ class TickData(object):
         self.passphrase = cfg['api_passphrase']
         self.timeout_sec = timeout_sec
         self.trade_log_file_path = trade_log_file_path
-        self.authtrader = Trader(product_id=self.product_id,
+        self.authtrader = Trader(#product_id=self.product_id,
                                  api_key=self.api_key,
                                  api_secret=self.api_secret,
                                  passphrase=self.passphrase,

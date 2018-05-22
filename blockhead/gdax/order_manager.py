@@ -28,7 +28,6 @@ class Order:
         self.pair = pair
         self.limit_price = limit_price
         self.total = abs(size)
-        self.outstanding = abs(size)
         self.placed = Decimal(0)
         self.filled = Decimal(0)
         self.state = 'initial'
@@ -39,7 +38,11 @@ class Order:
 
     def __str__(self):
         """ standard string representation """
-        return f'<Order size: {self.size}, o: {self.outstanding}, lp: {self.limit_price}. p: {self.placed}, f: {self.filled}, s: {self.state}, id: {self.order_id}'
+        return f'<Order size: {self.size}, lp: {self.limit_price}. p: {self.placed}, f: {self.filled}, s: {self.state}, id: {self.order_id}'
+
+    def outstanding(self):
+        """ outstanding size on the order """
+        return abs(self.size) - self.filled
 
     def update(self, details):
         """ update our details dict with info from the feed """
@@ -94,7 +97,6 @@ class OrderManager(object):
         self.client = self.tickdata.authtrader
         self.pair = pair
 
-        self.pending_orders = []
         self.pending_strategies = []
         self.strategies = []
         self.order_lookup = dict()
@@ -102,17 +104,6 @@ class OrderManager(object):
     async def init(self):
         """ async initialization """
         pass
-
-    async def add_order(self, size):
-        """ adds an order to buy/sell the target size """
-        order = Order(size, self.pair, self)
-        # track by client order id as well
-        self.order_lookup[order.client_oid] = order
-        if self.tickdata.initialized:
-            await order.begin()
-        else:
-            self.pending_orders.append(order)
-        return order
 
     async def add_strategy(self, strategy):
         """ adds a strategy which will handle order details """
@@ -125,12 +116,16 @@ class OrderManager(object):
 
     async def on_init(self, _):
         """ when client has data, we can process pending orders """
-        for order in self.pending_orders:
-            await order.begin()
         for strat in self.pending_strategies:
             await strat.init(self)
-        self.pending_orders.clear()
         self.pending_strategies.clear()
+
+    def total_outstanding(self):
+        """ return the total size outstanding by all strategies """
+        total = 0
+        for strat in self.strategies:
+            total += strat.outstanding()
+        return total
 
     async def cancel_all(self):
         """ cancel all orders for the pair
@@ -206,8 +201,15 @@ class OrderManager(object):
         hook for updating the strategy. Can look at the state of current
         orders and the book and determine whether changes need to be made.
         """
+        to_remove = []
         for strat in self.strategies:
             await strat.update_orders()
+            if strat.is_complete():
+                to_remove.append(strat)
+        for strat in to_remove:
+            logging.debug("Strategy is complete: %s", strat)
+            self.strategies.remove(strat)
+
 
 class Strategy(ABC):
     """ Order handling strategy. Will place and modify orders """
@@ -218,6 +220,10 @@ class Strategy(ABC):
 
     @abstractmethod
     async def init(self, omgr):
+        pass
+
+    @abstractmethod
+    def outstanding(self, omgr):
         pass
 
     @abstractmethod
@@ -247,6 +253,10 @@ class SimpleStrategy(Strategy):
         await self.order.begin()
         self.initialized = True
 
+    def outstanding(self, omgr):
+        if self.order is not None:
+            return self.order.outstanding()
+
     async def update_orders(self):
         """ do nothing, just leave orders there """
         pass
@@ -265,6 +275,10 @@ class FollowStrategy(Strategy):
         self.order = self.make_order()
         await self.order.begin()
         self.initialized = True
+
+    def outstanding(self, omgr):
+        if self.order is not None:
+            return self.order.outstanding()
 
     async def update_orders(self):
         """ Look at top of book, move order to follow on update """
