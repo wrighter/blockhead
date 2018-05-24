@@ -64,7 +64,9 @@ class Order:
         self.update(res)
 
     def handle_order_update(self, msg):
-        """ callback to handle our updates """
+        """ callback to handle our updates, returns the net
+        change in quantity from matches, or 0 if no change """
+        filled = Decimal(0)
         self.update(msg)
         if msg['type'] == 'received':
             logging.debug('Order received')
@@ -74,13 +76,19 @@ class Order:
             self.state = 'open'
         elif msg['type'] == 'match':
             logging.debug('Order matched')
-            self.filled += Decimal(msg['size'])
+            filled = Decimal(msg['size'])
+            self.filled += filled
             self.filled = self.filled.quantize(Order.FIVE_PLACES)
             if self.filled == self.total:
                 logging.debug('Order completed')
+            if msg['side'] == 'sell':
+                # want to return signed size for inventory tracking
+                # XXX refactor
+                filled = -filled
         elif msg['type'] == 'done':
             logging.debug('Order %s', msg['reason'])
             self.state = 'done'
+        return filled
 
 class OrderManager(object):
     """
@@ -100,6 +108,7 @@ class OrderManager(object):
         self.pending_strategies = []
         self.strategies = []
         self.order_lookup = dict()
+        self.inventory = Decimal(0)
 
     async def init(self):
         """ async initialization """
@@ -192,7 +201,8 @@ class OrderManager(object):
             if key in msg:
                 order = self.order_lookup.get(msg[key])
                 if order:
-                    order.handle_order_update(msg)
+                    filled = order.handle_order_update(msg)
+                    self.inventory += filled
                     return
         logging.error("Could not find matching order: %s", msg)
 
@@ -223,7 +233,7 @@ class Strategy(ABC):
         pass
 
     @abstractmethod
-    def outstanding(self, omgr):
+    def outstanding(self):
         pass
 
     @abstractmethod
@@ -234,9 +244,9 @@ class Strategy(ABC):
     def is_complete(self):
         pass
 
-    def make_order(self):
+    def make_order(self, qty):
         """ makes a new order object and tracks it """
-        order = Order(self.size, self.omgr.pair, self.omgr)
+        order = Order(qty, self.omgr.pair, self.omgr)
         # track by client order id as well
         self.omgr.order_lookup[order.client_oid] = order
         return order
@@ -245,20 +255,24 @@ class SimpleStrategy(Strategy):
     def __init__(self, size):
         super().__init__("SimpleStrategy")
         self.size = size
+        self.filled = Decimal(0)
         self.order = None
 
     async def init(self, omgr):
         self.omgr = omgr
-        self.order = self.make_order()
+        self.order = self.make_order(self.size)
         await self.order.begin()
         self.initialized = True
 
-    def outstanding(self, omgr):
+    def outstanding(self):
         if self.order is not None:
             return self.order.outstanding()
+        return 0
 
     async def update_orders(self):
         """ do nothing, just leave orders there """
+        if self.order is not None:
+            self.filled = self.order.filled
         pass
 
     def is_complete(self):
@@ -268,30 +282,38 @@ class FollowStrategy(Strategy):
     def __init__(self, size):
         super().__init__("FollowStrategy")
         self.size = size
+        self.remaining = size
+        self.filled = Decimal(0)
         self.order = None
 
     async def init(self, omgr):
         self.omgr = omgr
-        self.order = self.make_order()
+        self.order = self.make_order(self.size)
         await self.order.begin()
         self.initialized = True
 
-    def outstanding(self, omgr):
+    def outstanding(self):
         if self.order is not None:
             return self.order.outstanding()
+        return 0
 
     async def update_orders(self):
         """ Look at top of book, move order to follow on update """
         # TODO partial fills
         if not self.initialized:
             return
-        if self.size > 0:
+
+        # before any cancel/replaces, get our quantities right
+        if self.order is not None:
+            self.filled = self.order.filled
+            self.remaining = self.size - self.filled
+        if self.remaining > 0:
             # TODO simplify
             current_bid = self.omgr.tickdata.orderbook.get_bid(self.order.pair)
             if current_bid > self.order.limit_price and self.order.state != 'done':
                 resp = await self.omgr.cancel_order(self.order)
                 logging.debug("Cancel response: %s", resp)
-                self.order = self.make_order()
+                self.order = self.make_order(self.remaining)
                 res = await self.omgr.buy(self.order)
         else:
             current_ask = self.omgr.tickdata.orderbook.get_ask(self.order.pair)
@@ -300,7 +322,7 @@ class FollowStrategy(Strategy):
                 logging.debug("Order before cancel: %s", resp)
                 resp = await self.omgr.cancel_order(self.order)
                 logging.debug("Cancel response: %s", resp)
-                self.order = self.make_order()
+                self.order = self.make_order(self.remaining)
                 res = await self.omgr.sell(self.order)
 
     def is_complete(self):

@@ -47,14 +47,13 @@ async def run(loop, args):
     logging.info("You have %s %s", first, accounts[first]['available'])
     logging.info("You have %s %s", second, accounts[second]['available'])
 
-    inventory = Decimal(0)
     # assume that quantity is first in pair, and that we need
     # at least that amount in the pair on either side to run
     if args.quantity:
         total_qty = Decimal(accounts[second]['available'])/Decimal(ticker['price'])
         if args.use_inventory:
             current = Decimal(accounts[first]['available'])
-            inventory = current.min(args.quantity)
+            ordermanager.inventory = current.min(args.quantity)
             total_qty += current
         if total_qty < args.quantity:
             logging.error('Insufficient funds, exiting')
@@ -63,7 +62,7 @@ async def run(loop, args):
             logging.info('We have %s available to trade %s', total_qty, args.quantity)
             logging.info("%s:%s, %s:%s", first, accounts[first]['available'],
                          second, accounts[second]['available'])
-            logging.info("Initial inventory is %s", inventory)
+            logging.info("Initial inventory is %s", ordermanager.inventory)
 
     bars = await client.get_bars(args.pair, args.lookback * 26)
 
@@ -87,18 +86,18 @@ async def run(loop, args):
             logging.info("short")
 
         if client.initialized:
-            # TODO, look at sign flips without fills
+            # TODO, look at sign flips without fills in between
             if ema1 > ema2:
                 # if long and inventory < quantity, let's buy
-                qty = (Decimal(args.quantity) - inventory).quantize(Order.FIVE_PLACES)
+                qty = (Decimal(args.quantity) - ordermanager.inventory).quantize(Order.FIVE_PLACES)
                 qty -= ordermanager.total_outstanding()
                 if qty > 0:
                     asyncio.ensure_future(start_order(loop, qty))
                     logging.info("created order for %s", qty)
             else:
                 # if short, get rid of any inventory, cannot short
-                if inventory + ordermanager.total_outstanding() > 0:
-                    qty = -inventory.quantize(Order.FIVE_PLACES)
+                if ordermanager.inventory + ordermanager.total_outstanding() > 0:
+                    qty = -ordermanager.inventory.quantize(Order.FIVE_PLACES)
                     asyncio.ensure_future(start_order(loop, qty))
                     logging.info("created order for %s", qty)
             try:
@@ -120,10 +119,10 @@ async def run(loop, args):
         """ callback for checking positions """
         if not strategy.is_complete():
             asyncio.ensure_future(strategy.update_orders())
-        tdelta = datetime.timedelta(seconds=1,
-                                    microseconds=now.microsecond)
-        loop.call_at(loop.time() + tdelta.total_seconds(),
-                     do_order_update, loop, strategy, client)
+            tdelta = datetime.timedelta(seconds=1,
+                                        microseconds=now.microsecond)
+            loop.call_at(loop.time() + tdelta.total_seconds(),
+                         do_order_update, loop, strategy, client)
 
     def on_bar(client, bars, loop):
         """ handles appending bar and updating model """
