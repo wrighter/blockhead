@@ -11,6 +11,7 @@ import sys
 import logging
 import argparse
 import datetime
+import traceback
 from decimal import Decimal
 import asyncio
 import pandas as pd
@@ -89,17 +90,15 @@ async def run(loop, args):
             # TODO, look at sign flips without fills in between
             if ema1 > ema2:
                 # if long and inventory < quantity, let's buy
-                qty = (Decimal(args.quantity) - ordermanager.inventory).quantize(Order.FIVE_PLACES)
+                qty = (Decimal(args.quantity) - ordermanager.inventory)
                 qty -= ordermanager.total_outstanding()
                 if qty > 0:
                     asyncio.ensure_future(start_order(loop, qty))
-                    logging.info("created order for %s", qty)
             else:
                 # if short, get rid of any inventory, cannot short
                 if ordermanager.inventory + ordermanager.total_outstanding() > 0:
-                    qty = -ordermanager.inventory.quantize(Order.FIVE_PLACES)
+                    qty = -ordermanager.inventory
                     asyncio.ensure_future(start_order(loop, qty))
-                    logging.info("created order for %s", qty)
             try:
                 logging.info("bid: %s ask: %s",
                              client.orderbook.get_bid(args.pair),
@@ -109,11 +108,17 @@ async def run(loop, args):
 
     async def start_order(loop, quantity):
         """ starts an order strategy """
-        strategy = await ordermanager.add_strategy(FollowStrategy(quantity))
-        tdelta = datetime.timedelta(seconds=1,
-                                    microseconds=now.microsecond)
-        loop.call_at(loop.time() + tdelta.total_seconds(), do_order_update,
-                     loop, strategy, client)
+        # do one more check on order size
+        quantity = quantity.quantize(Order.FIVE_PLACES)
+        if abs(quantity) > 0:
+            strategy = await ordermanager.add_strategy(FollowStrategy(quantity))
+            logging.info("created order for %s", quantity)
+            tdelta = datetime.timedelta(seconds=1,
+                                        microseconds=now.microsecond)
+            loop.call_at(loop.time() + tdelta.total_seconds(), do_order_update,
+                         loop, strategy, client)
+        else:
+            logging.info("Too small to trade: %s", quantity)
 
     def do_order_update(loop, strategy, client):
         """ callback for checking positions """
@@ -129,18 +134,21 @@ async def run(loop, args):
         now = datetime.datetime.utcnow()
         if client.initialized:
             current_bar = client.current_bar.get_bar()
-            # append to bars
-            tdelta = datetime.timedelta(seconds=now.second,
-                                        microseconds=now.microsecond)
-            close_time = now - tdelta
-            open_time = close_time - datetime.timedelta(minutes=1)
-            current_bar['close_time'] = close_time
-            current_bar['open_time'] = open_time
-            bars = pd.concat([bars, pd.DataFrame(current_bar, index=[close_time])])
+            if current_bar is None:
+                logging.warning("Bar is invalid")
+            else:
+                # append to bars
+                tdelta = datetime.timedelta(seconds=now.second,
+                                            microseconds=now.microsecond)
+                close_time = now - tdelta
+                open_time = close_time - datetime.timedelta(minutes=1)
+                current_bar['close_time'] = close_time
+                current_bar['open_time'] = open_time
+                bars = pd.concat([bars, pd.DataFrame(current_bar, index=[close_time])])
 
-        do_indicator(bars)
+                do_indicator(bars)
 
-        logging.info('Recent bar data: %s', bars.tail(2))
+                logging.info('Recent bar data: %s', bars.tail(2))
         tdelta = datetime.timedelta(seconds=60-now.second,
                                     microseconds=now.microsecond)
         loop.call_at(loop.time() + tdelta.total_seconds(), on_bar,
@@ -191,6 +199,12 @@ def main():
         loop.run_until_complete(run(loop, args))
     except KeyboardInterrupt:
         logging.info("Quitting")
+        loop.stop()
+    except Exception as e:
+        logging.info("Uncaught exception: %s", e)
+        exc_type, exc_value, exc_traceback = sys.exc_info()
+        traceback.print_exception(exc_type, exc_value, exc_traceback,
+                                  limit=2, file=sys.stdout)
         loop.stop()
 
     loop.close()
